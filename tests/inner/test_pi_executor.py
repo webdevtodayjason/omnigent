@@ -25,9 +25,11 @@ from omnigent.inner.pi_executor import (
     PiExecutor,
     _build_models_json,
     _generate_extension_js,
+    _parse_data_uri,
     _pi_provider_for_model,
     _PiRpcSession,
     _sanitize_schema,
+    _to_pi_message_and_images,
     _ToolServer,
 )
 from omnigent.onboarding.databricks_config import DATABRICKS_CLAUDE_DEFAULT_MODEL
@@ -436,6 +438,74 @@ class TestBuildModelsJson(unittest.TestCase):
     def test_gpt_provider_uses_completions_api(self):
         result = _build_models_json("https://h", "t")
         self.assertEqual(result["providers"]["databricks"]["api"], "openai-completions")
+
+    def test_static_models_declare_image_input(self):
+        # Every static Databricks model must declare ``input`` including
+        # "image" so Pi's transformMessages passes image blocks through
+        # instead of omitting them (#515). The completions catch-all is
+        # empty, so only the GPT/Claude static lists are exercised.
+        result = _build_models_json("https://host.example.com", "tok")
+        for prov_name in ("databricks", "databricks-anthropic"):
+            for entry in result["providers"][prov_name]["models"]:
+                self.assertIn(
+                    "image",
+                    entry.get("input", []),
+                    f"{prov_name}/{entry['id']} missing image input (#515)",
+                )
+
+    def test_dynamic_model_declares_image_input(self):
+        # A gateway model outside the static lists is registered with
+        # ``input: ["text", "image"]`` so vision models receive images (#515).
+        model = "moonshotai/kimi-vision-a"
+        result = _build_models_json("https://host.example.com", "tok", model=model)
+        provider = result["providers"][_pi_provider_for_model(model)]
+        registered = [m for m in provider["models"] if m.get("id") == model]
+        self.assertEqual(len(registered), 1)
+        self.assertEqual(registered[0]["input"], ["text", "image"])
+
+
+class TestToPiMessageAndImages(unittest.TestCase):
+    def test_text_blocks_joined_with_newlines(self):
+        message, images = _to_pi_message_and_images(
+            [
+                {"type": "input_text", "text": "hello"},
+                {"type": "text", "text": "world"},
+            ]
+        )
+        self.assertEqual(message, "hello\nworld")
+        self.assertEqual(images, [])
+
+    def test_image_block_becomes_native_image(self):
+        message, images = _to_pi_message_and_images(
+            [
+                {"type": "input_text", "text": "describe this"},
+                {"type": "input_image", "image_url": "data:image/png;base64,QUJD"},
+            ]
+        )
+        self.assertEqual(message, "describe this")
+        self.assertEqual(
+            images,
+            [{"type": "image", "data": "QUJD", "mimeType": "image/png"}],
+        )
+
+    def test_parse_data_uri_media_type(self):
+        self.assertEqual(_parse_data_uri("data:image/jpeg;base64,AAA"), ("image/jpeg", "AAA"))
+
+    def test_malformed_image_block_raises(self):
+        # An input_image without a resolved data: URI must surface a loud
+        # error rather than being silently dropped or JSON-baked into the
+        # text prompt (#515).
+        with self.assertRaises(ValueError):
+            _to_pi_message_and_images(
+                [{"type": "input_image", "image_url": "file_id_not_resolved"}]
+            )
+
+    def test_non_dict_blocks_skipped(self):
+        message, images = _to_pi_message_and_images(
+            ["not-a-dict", {"type": "input_text", "text": "ok"}]
+        )
+        self.assertEqual(message, "ok")
+        self.assertEqual(images, [])
 
 
 # ---------------------------------------------------------------------------
@@ -1456,6 +1526,69 @@ class TestRunTurn(unittest.TestCase):
             self.assertEqual(text_chunks[1].text, "world")
             self.assertEqual(len(turn_complete), 1)
             self.assertEqual(turn_complete[0].response, "Hello world")
+
+        _run(_test())
+
+    def test_multimodal_prompt_sends_native_images_field(self):
+        async def _test():
+            executor = self._make_executor()
+
+            fake_rpc = _PiRpcSession()
+            fake_rpc._line_queue = asyncio.Queue()
+            fake_rpc.process = MagicMock()
+            fake_rpc.process.returncode = None
+            fake_rpc.process.stdin = _FakeStreamWriter()
+            fake_rpc._stderr_lines = []
+
+            # Capture the prompt command Pi receives instead of writing it
+            # to stdin, so we can assert the exact message + images shape.
+            sent = []
+
+            async def capture(cmd):
+                sent.append(cmd)
+
+            fake_rpc.send_command = capture
+
+            async def fake_ensure_rpc(*args, **kwargs):
+                return fake_rpc
+
+            executor._ensure_rpc = fake_ensure_rpc
+
+            # A text delta + agent_end so the read loop terminates with a
+            # TurnComplete (an empty queue would surface as ExecutorError).
+            for line in (
+                json.dumps({"type": "response", "success": True}),
+                json.dumps(
+                    {
+                        "type": "message_update",
+                        "assistantMessageEvent": {"type": "text_delta", "delta": "red"},
+                    }
+                ),
+                json.dumps({"type": "agent_end", "messages": []}),
+            ):
+                fake_rpc._line_queue.put_nowait(line)
+
+            user_msg = {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe this"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,QUJD"},
+                ],
+            }
+            events = [e async for e in executor.run_turn([user_msg], [], "system")]
+
+            # The image must reach Pi via the native ``images`` field, not
+            # JSON-baked into the text message (#515).
+            self.assertEqual(len(sent), 1)
+            cmd = sent[0]
+            self.assertEqual(cmd["type"], "prompt")
+            self.assertEqual(cmd["message"], "describe this")
+            self.assertNotIn("data:image/png;base64,QUJD", cmd["message"])
+            self.assertEqual(
+                cmd["images"],
+                [{"type": "image", "data": "QUJD", "mimeType": "image/png"}],
+            )
+            self.assertTrue(any(isinstance(e, TurnComplete) for e in events))
 
         _run(_test())
 
@@ -2502,9 +2635,9 @@ def test_build_models_json_registers_unknown_model_with_routed_provider() -> Non
         model="moonshotai/kimi-k2.6",
     )
     completions = result["providers"]["databricks-completions"]
-    # The run model is registered (bare-id entry, the shape ucode writes)
-    # under the provider _pi_provider_for_model routes it to…
-    assert {"id": "moonshotai/kimi-k2.6"} in completions["models"]
+    # The run model is registered with ``input`` declaring image support
+    # (#515) under the provider _pi_provider_for_model routes it to…
+    assert {"id": "moonshotai/kimi-k2.6", "input": ["text", "image"]} in completions["models"]
     # …and that provider points at the generic gateway with the
     # Chat-Completions dialect OpenRouter speaks.
     assert completions["baseUrl"] == "https://openrouter.ai/api/v1"

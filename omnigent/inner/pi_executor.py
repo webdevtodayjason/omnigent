@@ -508,20 +508,31 @@ def _find_pi_cli() -> str | None:
 # Databricks exposes API styles at different URL paths. ucode state can
 # override these provider URLs; the host-derived defaults remain for legacy
 # profile-only usage.
+# Every entry declares ``input: ["text", "image"]`` so Pi's
+# transformMessages passes image blocks through instead of omitting them
+# for these vision-capable gateway models (#515).
 
 _DATABRICKS_RESPONSES_MODELS = [
     {
         "id": "databricks-gpt-5-4-mini",
+        "input": ["text", "image"],
         "name": "GPT-5.4 Mini",
         "contextWindow": 1047576,
         "maxTokens": 32768,
     },
-    {"id": "databricks-gpt-5-4", "name": "GPT-5.4", "contextWindow": 1047576, "maxTokens": 32768},
+    {
+        "id": "databricks-gpt-5-4",
+        "input": ["text", "image"],
+        "name": "GPT-5.4",
+        "contextWindow": 1047576,
+        "maxTokens": 32768,
+    },
 ]
 
 _DATABRICKS_ANTHROPIC_MODELS = [
     {
         "id": "databricks-claude-opus-4-8",
+        "input": ["text", "image"],
         "name": "Claude Opus 4.8",
         # Gateway-verified caps: >1000000 input rejects, 128001+ output rejects.
         "contextWindow": 1000000,
@@ -529,12 +540,14 @@ _DATABRICKS_ANTHROPIC_MODELS = [
     },
     {
         "id": "databricks-claude-sonnet-4-6",
+        "input": ["text", "image"],
         "name": "Claude Sonnet 4.6",
         "contextWindow": 1000000,
         "maxTokens": 128000,
     },
     {
         "id": "databricks-claude-sonnet-4-5",
+        "input": ["text", "image"],
         "name": "Claude Sonnet 4.5",
         # Gateway rejects this model past ~200k input.
         "contextWindow": 200000,
@@ -610,10 +623,12 @@ def _build_models_json(
         e.g. ``{"claude": "...", "openai": "..."}`` — from ucode state or
         a generic (OpenRouter/LiteLLM) provider entry.
     :param model: The resolved model id this run will select, e.g.
-        ``"moonshotai/kimi-k2.6"``; registered (bare ``{"id": ...}``, the
-        same shape ucode writes) under the provider
-        :func:`_pi_provider_for_model` routes it to when absent from the
-        static list. ``None`` skips registration (Pi picks its default).
+        ``"moonshotai/kimi-k2.6"``; registered with
+        ``{"id": ..., "input": ["text", "image"]}`` (so Pi's
+        transformMessages passes image blocks through instead of omitting
+        them) under the provider :func:`_pi_provider_for_model` routes it
+        to when absent from the static list. ``None`` skips registration
+        (Pi picks its default).
     :returns: Pi ``models.json`` contents.
     """
     h = host.rstrip("/")
@@ -680,7 +695,9 @@ def _build_models_json(
             # Rebind (don't append): the static lists are module-level
             # constants shared across builds, so in-place mutation would
             # leak this run's model id into every later models.json.
-            provider["models"] = [*provider["models"], {"id": model}]
+            # ``input`` declares image support so Pi's transformMessages
+            # passes image blocks through instead of omitting them (#515).
+            provider["models"] = [*provider["models"], {"id": model, "input": ["text", "image"]}]
     return config
 
 
@@ -1046,6 +1063,59 @@ def _build_pi_prompt(
         return "\n".join(lines)
 
     return _extract_latest_user_content(messages)
+
+
+def _parse_data_uri(uri: str) -> tuple[str, str]:
+    """Split a ``data:<media>;base64,<payload>`` URI into media type and data.
+
+    :param uri: A data URI, e.g. ``"data:image/png;base64,QUJD"``.
+    :returns: ``(media_type, payload)`` — e.g. ``("image/png", "QUJD")``.
+    """
+    header, _, payload = uri[5:].partition(",")
+    media_type = header.replace(";base64", "")
+    return media_type, payload
+
+
+def _to_pi_message_and_images(  # type: ignore[explicit-any]
+    blocks: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, str]]]:
+    """Split Omnigent content blocks into Pi's native ``message`` + ``images``.
+
+    Pi's RPC prompt command carries text as ``message`` (a string) and
+    images as a separate ``images`` field of ``ImageContent`` dicts
+    (``{"type": "image", "data": <base64>, "mimeType": <media>}``), not
+    JSON-encoded into the text. Text blocks (``input_text`` /
+    ``output_text`` / ``text``) are joined with newlines; ``input_image``
+    blocks are decoded from their ``image_url`` data URI.
+
+    :param blocks: Omnigent content blocks from the latest user message.
+    :returns: ``(message, images)`` — the joined text prompt and the
+        native Pi image list.
+    :raises ValueError: when an ``input_image`` block lacks a resolved
+        ``data:`` URI ``image_url`` (the content resolver should inline
+        file_id references before this point).
+    """
+    text_parts: list[str] = []
+    images: list[dict[str, str]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type in ("input_text", "output_text", "text"):
+            text = block.get("text")
+            if text:
+                text_parts.append(text)
+        elif block_type == "input_image":
+            image_url = block.get("image_url")
+            if not isinstance(image_url, str) or not image_url.startswith("data:"):
+                raise ValueError(
+                    "input_image block is missing a resolved 'image_url' data URI. "
+                    "Upload the image via the session files API and reference it by "
+                    "file_id so the content resolver can inline it."
+                )
+            media_type, data = _parse_data_uri(image_url)
+            images.append({"type": "image", "data": data, "mimeType": media_type})
+    return "\n".join(text_parts), images
 
 
 @dataclass(frozen=True)
@@ -1838,24 +1908,26 @@ class PiExecutor(Executor):
         if state is not None:
             state._has_sent_prompt = True
 
-        # Send prompt command. Pi's JSONL protocol requires
-        # ``message`` to be a string. When the prompt carries
-        # multimodal content blocks, JSON-encode them so the
-        # LLM sees the image data URIs in its context.
+        # Send prompt command. Pi's JSONL protocol requires ``message`` to
+        # be a string; multimodal content blocks are split into a native
+        # ``images`` field (Pi's RPC ``ImageContent``) so the provider
+        # receives real image inputs instead of a JSON-encoded text blob (#515).
         message: str
-        if isinstance(prompt, list):
-            message = json.dumps(prompt)
-        else:
-            message = prompt
-        cmd_id = f"turn_{id(messages)}"
+        pi_images: list[dict[str, str]] = []
         try:
-            await rpc.send_command(
-                {
-                    "type": "prompt",
-                    "message": message,
-                    "id": cmd_id,
-                }
-            )
+            if isinstance(prompt, list):
+                message, pi_images = _to_pi_message_and_images(prompt)
+            else:
+                message = prompt
+        except ValueError as exc:
+            yield ExecutorError(message=f"Failed to build Pi prompt: {exc}")
+            return
+        cmd_id = f"turn_{id(messages)}"
+        cmd: dict[str, Any] = {"type": "prompt", "message": message, "id": cmd_id}  # type: ignore[explicit-any]
+        if pi_images:
+            cmd["images"] = pi_images
+        try:
+            await rpc.send_command(cmd)
         except Exception as exc:  # noqa: BLE001 — executor boundary surfaces prompt-send errors as ExecutorError
             yield ExecutorError(message=f"Failed to send prompt to Pi: {exc}")
             return
