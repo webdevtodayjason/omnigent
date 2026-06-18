@@ -2684,6 +2684,7 @@ function ContextRing({ contextWindow, tokensUsed }: { contextWindow: number; tok
 export function formatStatusModelLabel(
   model: string | null,
   codexModelOptions: readonly CodexModelOption[] = [],
+  harness: string | null = null,
 ): string | null {
   const raw = model?.trim();
   if (!raw) return null;
@@ -2694,11 +2695,16 @@ export function formatStatusModelLabel(
   if (known) return known.label;
   // Cursor: resolve a Cursor SDK id (or a legacy display label) to its
   // friendly picker label, so the status tray reads "Composer" not
-  // "composer-2.5" (#547).
-  const cursorById = CURSOR_NATIVE_MODELS.find((m) => m.id === raw);
-  if (cursorById) return cursorById.label;
-  const cursorByLabel = CURSOR_NATIVE_MODELS.find((m) => m.label.toLowerCase() === lower);
-  if (cursorByLabel) return cursorByLabel.label;
+  // "composer-2.5" (#547). Gated on the session harness because the Cursor
+  // catalog shares ids with Codex (e.g. ``gpt-5.5``) — only a cursor session
+  // should relabel them, otherwise a Codex override would misrender as
+  // ``GPT-5.5``.
+  if (harness === "cursor") {
+    const cursorById = CURSOR_NATIVE_MODELS.find((m) => m.id === raw);
+    if (cursorById) return cursorById.label;
+    const cursorByLabel = CURSOR_NATIVE_MODELS.find((m) => m.label.toLowerCase() === lower);
+    if (cursorByLabel) return cursorByLabel.label;
+  }
   return raw;
 }
 
@@ -2719,9 +2725,10 @@ export function formatModelEffortStatusLabel(
   model: string | null,
   effort: string | null,
   codexModelOptions: readonly CodexModelOption[] = [],
+  harness: string | null = null,
 ): string | null {
   const codexOption = model ? findCodexModelOption(codexModelOptions, model.trim()) : null;
-  const modelLabel = formatStatusModelLabel(model, codexModelOptions);
+  const modelLabel = formatStatusModelLabel(model, codexModelOptions, harness);
   const effortLabel = formatStatusEffortLabel(effort, codexOption !== null);
   const parts = [modelLabel, effortLabel].filter((p): p is string => p != null && p.length > 0);
   return parts.length > 0 ? parts.join(" ") : null;
@@ -2752,10 +2759,19 @@ function ComposerStatusLine() {
   // alongside contextWindow — so the branch reads from the same store as
   // the other status-line values rather than a separate fetch.
   const gitBranch = useChatStore((s) => s.gitBranch);
+  // Harness gates the Cursor model-id → label relabel in the status tray
+  // (#547): the Cursor catalog shares ids with Codex (``gpt-5.5``), so only
+  // a cursor session should relabel them.
+  const sessionHarness = useChatStore((s) => s.sessionHarness);
 
   const showBranch = !!conversationId && !!gitBranch;
   const modelEffortLabel = conversationId
-    ? formatModelEffortStatusLabel(selectedModel ?? llmModel, selectedEffort, codexModelOptions)
+    ? formatModelEffortStatusLabel(
+        selectedModel ?? llmModel,
+        selectedEffort,
+        codexModelOptions,
+        sessionHarness,
+      )
     : null;
   const showPlanMode = !!conversationId && codexPlanMode;
   // contextWindow > 0: the SSE path validates it but the snapshot path doesn't, and 0/0 → "NaN%".

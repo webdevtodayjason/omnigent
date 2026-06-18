@@ -151,14 +151,24 @@ describe("isCursorNativeModel", () => {
 describe("formatStatusModelLabel (Cursor)", () => {
   it("resolves a Cursor SDK id to its friendly label for the status tray", () => {
     // WHY: the tray should read "Composer", not the raw "composer-2.5" the
-    // runner injects (#547).
-    expect(formatStatusModelLabel("composer-2.5")).toBe("Composer");
-    expect(formatStatusModelLabel("default")).toBe("Default");
+    // runner injects (#547). The Cursor relabel is gated on the session
+    // harness because the Cursor catalog shares ids with Codex
+    // (``gpt-5.5``) — a non-cursor session must leave them raw.
+    expect(formatStatusModelLabel("composer-2.5", [], "cursor")).toBe("Composer");
+    expect(formatStatusModelLabel("default", [], "cursor")).toBe("Default");
   });
 
   it("resolves a legacy display-label override to its friendly label", () => {
     // A session pinned before the picker sent SDK ids may still carry the
     // display label as its override — show the friendly name, not the raw id.
-    expect(formatStatusModelLabel("Composer")).toBe("Composer");
+    expect(formatStatusModelLabel("Composer", [], "cursor")).toBe("Composer");
+  });
+
+  it("leaves Cursor-catalog ids raw for a non-cursor (e.g. Codex) session", () => {
+    // WHY: ``gpt-5.5`` is a valid Cursor SDK id AND a Codex id — without the
+    // harness gate the status tray would mislabel a Codex override as
+    // ``GPT-5.5``. The harness gate keeps the raw id for non-cursor sessions.
+    expect(formatStatusModelLabel("gpt-5.5", [])).toBe("gpt-5.5");
+    expect(formatStatusModelLabel("gpt-5.5", [], "codex")).toBe("gpt-5.5");
   });
 });
