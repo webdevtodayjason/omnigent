@@ -86,6 +86,7 @@ import {
 import { getCurrentAuthorId } from "@/lib/identity";
 import { CLAUDE_NATIVE_MODELS } from "@/lib/claudeNativeModels";
 import { codexEffortLevelsForModel, findCodexModelOption } from "@/lib/codexNativeModels";
+import { CURSOR_NATIVE_MODELS } from "@/lib/cursorNativeModels";
 import {
   consumePendingInitialPrompt,
   type PendingInitialPrompt,
@@ -752,6 +753,7 @@ export function ChatPage() {
   const codexModelOptions = useChatStore((s) => s.codexModelOptions);
   const selectedModel = useChatStore((s) => s.selectedModel);
   const llmModel = useChatStore((s) => s.llmModel);
+  const sessionHarness = useChatStore((s) => s.sessionHarness);
 
   // Loading + error gates for `/c/:id` hydration.
   if (urlConvId) {
@@ -841,6 +843,7 @@ export function ChatPage() {
   // Once present, the live session snapshot is authoritative.
   const capabilitySource = {
     labels: activeSession ? (activeSession.labels ?? {}) : (activeConv?.labels ?? {}),
+    harness: sessionHarness,
   };
   const modelPickerKind = modelPickerKindForConv(capabilitySource);
   const effortLevels = effortLevelsForConv(
@@ -2689,6 +2692,13 @@ export function formatStatusModelLabel(
   if (codexOption) return codexOption.displayName ?? codexOption.id;
   const known = CLAUDE_NATIVE_MODELS.find((m) => m.id === lower);
   if (known) return known.label;
+  // Cursor: resolve a Cursor SDK id (or a legacy display label) to its
+  // friendly picker label, so the status tray reads "Composer" not
+  // "composer-2.5" (#547).
+  const cursorById = CURSOR_NATIVE_MODELS.find((m) => m.id === raw);
+  if (cursorById) return cursorById.label;
+  const cursorByLabel = CURSOR_NATIVE_MODELS.find((m) => m.label.toLowerCase() === lower);
+  if (cursorByLabel) return cursorByLabel.label;
   return raw;
 }
 
@@ -3938,9 +3948,15 @@ const EFFORT_LEVELS = ["low", "medium", "high"] as const;
 /** Anthropic-side efforts for claude-native sessions (matches ANTHROPIC_EFFORTS in reasoning_effort.py). */
 const CLAUDE_NATIVE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
-type NativeModelPickerKind = "claude" | "codex";
+type NativeModelPickerKind = "claude" | "codex" | "cursor";
 
-type LabelSource = { labels?: Record<string, string | null> | null } | null | undefined;
+type LabelSource =
+  | {
+      labels?: Record<string, string | null> | null;
+      harness?: string | null;
+    }
+  | null
+  | undefined;
 
 /**
  * Resolve a structural read-only reason from session labels.
@@ -3991,22 +4007,41 @@ export function effortLevelsForConv(
  * Gated on the wrapper label, not `omnigent.ui === "terminal"`:
  * other terminal-first wrappers may not be Claude/Codex-native (see
  * `TerminalFirstContext.tsx`).
+ *
+ * The Cursor SDK brain harness (a bundle agent like Polly with
+ * ``harness: "cursor"``) is not a native terminal wrapper — it has no
+ * ``omnigent.wrapper`` label — so the cursor model picker is gated on the
+ * session's brain harness instead. The picker sources options from a static
+ * Cursor SDK catalog ({@link CURSOR_NATIVE_MODELS}); the runner honors the
+ * mid-session override via ``HARNESS_CURSOR_MODEL`` (#547).
  */
 export function modelPickerKindForConv(
-  conv: { labels?: Record<string, string | null> | null } | null | undefined,
+  conv:
+    | {
+        labels?: Record<string, string | null> | null;
+        harness?: string | null;
+      }
+    | null
+    | undefined,
 ): NativeModelPickerKind | null {
   switch (conv?.labels?.["omnigent.wrapper"]) {
     case "claude-code-native-ui":
       return "claude";
     case "codex-native-ui":
       return "codex";
-    default:
-      return null;
   }
+  if (conv?.harness === "cursor") return "cursor";
+  return null;
 }
 
 export function shouldShowModelPicker(
-  conv: { labels?: Record<string, string | null> | null } | null | undefined,
+  conv:
+    | {
+        labels?: Record<string, string | null> | null;
+        harness?: string | null;
+      }
+    | null
+    | undefined,
 ): boolean {
   return modelPickerKindForConv(conv) !== null;
 }
@@ -4103,7 +4138,9 @@ function AgentPicker({
       ? CLAUDE_NATIVE_MODELS
       : modelPickerKind === "codex"
         ? codexModelOptions
-        : [];
+        : modelPickerKind === "cursor"
+          ? CURSOR_NATIVE_MODELS
+          : [];
   const isNativeModelPicker = modelPickerKind !== null;
   // Only offer the agent list when there's an actual choice. Inside a
   // session the picker is scoped to the single bound agent (the runner is
@@ -4199,7 +4236,17 @@ function AgentPicker({
                 selectedModel === null &&
                 (modelPickerKind === "codex"
                   ? findCodexModelOption(codexModelOptions, llmModel)?.id === m.id
-                  : isModelImplicitlySelected(m.id, llmModel));
+                  : modelPickerKind === "cursor"
+                    ? // Cursor SDK ids are exact (no tier aliases), so match
+                      // exactly — the loose ``includes`` used for Claude tiers
+                      // would falsely light "gpt-5.1" when "gpt-5.1-codex-mini" is
+                      // bound. Also accept the display label (a legacy override)
+                      // so a session pinned to "Composer" still lights its row.
+                      llmModel === m.id ||
+                      (llmModel != null &&
+                        m.label != null &&
+                        llmModel.toLowerCase() === m.label.toLowerCase())
+                    : isModelImplicitlySelected(m.id, llmModel));
               const isActive = isExplicit || isImplicit;
               return (
                 <DropdownMenuItem

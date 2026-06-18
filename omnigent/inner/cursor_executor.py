@@ -76,6 +76,21 @@ _DEFAULT_CURSOR_MODEL = "auto"
 # instead of blocking the SDK's daemon callback thread forever.
 _TOOL_CALL_TIMEOUT_S = 1800.0
 
+# Known Cursor display labels (the friendly names the web switcher / a user
+# might pick or type) mapped to the Cursor SDK model ids the SDK accepts. The
+# SDK rejects a display label like ``Composer`` with an invalid_argument error
+# (``Cannot use this model: Composer. Available models: default, composer-2.5,
+# ...``); normalizing here, before agent creation, means any path that writes a
+# display label into the cursor model override — the web model switcher,
+# ``/model Composer``, or the API — is translated to the SDK id the bridge
+# expects. This is a static snapshot of the labels that don't match their SDK
+# ids; the robust long-term fix is sourcing the picker options from
+# ``Cursor.models.list()`` (see #547 follow-up).
+_CURSOR_DISPLAY_LABEL_TO_SDK_ID: dict[str, str] = {
+    "default": "default",
+    "composer": "composer-2.5",
+}
+
 
 def _resolve_model(model: str | None) -> str:
     """Resolve the cursor model id, dropping ids cursor can't honor.
@@ -84,6 +99,10 @@ def _resolve_model(model: str | None) -> str:
     ``composer-2.5``, ...), so a gateway-routed model id (carried by a spec
     authored for another harness) falls back to cursor's auto-select. ``None``
     likewise resolves to ``auto`` (the SDK requires a model).
+
+    A known display label (e.g. ``Composer``) is normalized to its SDK id
+    (``composer-2.5``) so the SDK doesn't reject it — see
+    :data:`_CURSOR_DISPLAY_LABEL_TO_SDK_ID`.
     """
     if not model or model.startswith(("databricks-", "databricks/")):
         if model:
@@ -97,6 +116,12 @@ def _resolve_model(model: str | None) -> str:
                 _DEFAULT_CURSOR_MODEL,
             )
         return _DEFAULT_CURSOR_MODEL
+    # Normalize a known display label (e.g. "Composer") to its SDK id
+    # ("composer-2.5"). Case-insensitive: the web switcher sends Title-Cased
+    # labels, but a user-typed ``/model composer`` reaches the same id.
+    normalized = _CURSOR_DISPLAY_LABEL_TO_SDK_ID.get(model.lower())
+    if normalized is not None:
+        return normalized
     return model
 
 

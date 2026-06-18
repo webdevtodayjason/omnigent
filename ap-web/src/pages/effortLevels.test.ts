@@ -106,6 +106,34 @@ describe("shouldShowModelPicker", () => {
     const conv = { labels: { "omnigent.wrapper": "some-other-wrapper" } };
     expect(shouldShowModelPicker(conv)).toBe(false);
   });
+
+  it("returns true for a Cursor brain-harness session (no native wrapper label)", () => {
+    // WHY: cursor is an SDK brain harness (a bundle agent like Polly), not a
+    // native terminal wrapper — it has no ``omnigent.wrapper`` label. The
+    // picker is gated on the session's ``harness`` instead so the switcher
+    // can send valid Cursor SDK ids rather than display labels (#547).
+    expect(shouldShowModelPicker({ harness: "cursor" })).toBe(true);
+    expect(shouldShowModelPicker({ labels: {}, harness: "cursor" })).toBe(true);
+  });
+
+  it("returns false for a non-cursor brain harness and missing harness", () => {
+    // WHY: other SDK harnesses (claude-sdk, pi, openai-agents) don't expose a
+    // Cursor catalog; fail closed so no non-functional picker pops.
+    expect(shouldShowModelPicker({ harness: "claude-sdk" })).toBe(false);
+    expect(shouldShowModelPicker({ harness: null })).toBe(false);
+    expect(shouldShowModelPicker({ labels: {} })).toBe(false);
+  });
+
+  it("prefers the native wrapper label over the brain harness", () => {
+    // WHY: a claude-native session whose brain harness happens to be cursor
+    // must still show the Claude picker, not the Cursor one.
+    expect(
+      shouldShowModelPicker({
+        labels: { "omnigent.wrapper": "claude-code-native-ui" },
+        harness: "cursor",
+      }),
+    ).toBe(true);
+  });
 });
 
 describe("shouldShowEffortPicker", () => {

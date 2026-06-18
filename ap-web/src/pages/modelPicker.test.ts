@@ -6,8 +6,9 @@ import {
   findCodexModelOption,
   isCodexNativeModel,
 } from "@/lib/codexNativeModels";
+import { CURSOR_NATIVE_MODELS, isCursorNativeModel } from "@/lib/cursorNativeModels";
 import type { CodexModelOption } from "@/lib/types";
-import { isModelImplicitlySelected } from "./ChatPage";
+import { formatStatusModelLabel, isModelImplicitlySelected } from "./ChatPage";
 
 const CODEX_MODEL_OPTIONS: CodexModelOption[] = [
   {
@@ -109,5 +110,55 @@ describe("isModelImplicitlySelected", () => {
 
   it("returns false when no model is bound", () => {
     expect(isModelImplicitlySelected("opus", null)).toBe(false);
+  });
+});
+
+describe("CURSOR_NATIVE_MODELS", () => {
+  it("pairs each friendly display label with the SDK id the picker sends", () => {
+    // The core of #547: the picker sends ``id`` (the SDK id the Cursor bridge
+    // accepts) and shows ``label`` (the friendly name). ``Composer`` must map
+    // to ``composer-2.5`` so the SDK never receives the display label.
+    const composer = CURSOR_NATIVE_MODELS.find((m) => m.label === "Composer");
+    expect(composer?.id).toBe("composer-2.5");
+    expect(CURSOR_NATIVE_MODELS.find((m) => m.id === "default")?.label).toBe("Default");
+    // Every option carries a non-empty id + label so the picker never sends a
+    // display label as the model override.
+    for (const m of CURSOR_NATIVE_MODELS) {
+      expect(m.id.length).toBeGreaterThan(0);
+      expect(m.label.length).toBeGreaterThan(0);
+      expect(m.id).not.toBe("Composer"); // the display label never leaks as id
+    }
+  });
+});
+
+describe("isCursorNativeModel", () => {
+  it("accepts the bare Cursor SDK ids and their display labels", () => {
+    expect(isCursorNativeModel("composer-2.5")).toBe(true);
+    expect(isCursorNativeModel("Composer")).toBe(true);
+    expect(isCursorNativeModel("default")).toBe(true);
+    expect(isCursorNativeModel("gpt-5.5")).toBe(true);
+  });
+
+  it("rejects foreign harness ids that leak across the global picker", () => {
+    // WHY: the sticky-model handoff must not push a Claude/Codex id onto a
+    // cursor session (the SDK would reject it).
+    expect(isCursorNativeModel("opus")).toBe(false);
+    expect(isCursorNativeModel("databricks-claude-sonnet-4-6")).toBe(false);
+    expect(isCursorNativeModel(null)).toBe(false);
+  });
+});
+
+describe("formatStatusModelLabel (Cursor)", () => {
+  it("resolves a Cursor SDK id to its friendly label for the status tray", () => {
+    // WHY: the tray should read "Composer", not the raw "composer-2.5" the
+    // runner injects (#547).
+    expect(formatStatusModelLabel("composer-2.5")).toBe("Composer");
+    expect(formatStatusModelLabel("default")).toBe("Default");
+  });
+
+  it("resolves a legacy display-label override to its friendly label", () => {
+    // A session pinned before the picker sent SDK ids may still carry the
+    // display label as its override — show the friendly name, not the raw id.
+    expect(formatStatusModelLabel("Composer")).toBe("Composer");
   });
 });
