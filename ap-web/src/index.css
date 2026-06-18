@@ -509,6 +509,28 @@
   cursor: pointer;
 }
 
+/* GFM task lists (`* [ ]` / `* [x]`) — remark-gfm tags the list with
+ * `contains-task-list` and each task item with `task-list-item`, emitting a
+ * disabled <input type=checkbox> whose `checked` attribute mirrors the marker.
+ * Streamdown's default <ul> always applies `list-disc`, which sits a disc
+ * bullet beside every checkbox and makes the list read as plain bullets
+ * (#552). Drop the inherited disc marker for task items only (plain `* foo`
+ * items lack `task-list-item` and keep their disc) and lay the checkbox out
+ * inline with the text, letting the native checkbox reflect the checked
+ * state. Inline (not flex) keeps mixed inline content — `* [x] a **bold** c` —
+ * flowing as one text run; flex + gap would split the strong/text into
+ * separate flex items and run the words together. */
+ul.contains-task-list > li.task-list-item {
+  list-style: none;
+  padding-left: 0;
+}
+ul.contains-task-list > li.task-list-item > input[type="checkbox"] {
+  margin: 0 0.375rem 0 0;
+  vertical-align: middle;
+  accent-color: var(--primary);
+  cursor: default;
+}
+
 /* Flatten Streamdown's loud heading ramp (text-3xl..xl) to em sizes proportional to body. */
 [data-streamdown="heading-1"] {
   font-size: 1.4em;
