@@ -747,6 +747,51 @@ def test_bundled_agent_no_credential_does_not_write_config(
     dispatch.assert_called_once()
 
 
+def test_bundled_agent_unreadable_global_config_degrades_to_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A corrupt on-disk config degrades to launch, never crashes (#334).
+
+    The fallback reads the on-disk providers via the non-forgiving
+    ``_load_global_config`` to decide what to persist. If that read blows up
+    on a malformed/corrupt config, the bundled launch must degrade to a no-op
+    (letting the harness raise its own credential error) rather than crashing
+    before the harness ever runs — the exact failure mode this path exists to
+    avoid. An explicit anthropic key keeps the fallback loop reaching that read.
+    """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr("omnigent.onboarding.detected.detect_providers", list)
+    monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
+    _write_isolated_provider_config(
+        tmp_path,
+        {
+            "anthropic_key": {
+                "kind": "key",
+                "anthropic": {
+                    "base_url": "https://api.anthropic.invalid/v1",
+                    "api_key_ref": "env:ANTHROPIC_KEY",
+                },
+            }
+        },
+    )
+
+    def _corrupt() -> dict[str, object]:
+        raise yaml.YAMLError("corrupt global config")
+
+    monkeypatch.setattr("omnigent.cli._load_global_config", _corrupt)
+    dispatch = Mock()
+    monkeypatch.setattr("omnigent.cli._dispatch_run", dispatch)
+
+    result = CliRunner().invoke(cli, ["polly"])
+
+    # Degrades cleanly: no traceback, and the launch still dispatches so the
+    # harness surfaces any credential error through the normal path.
+    assert result.exit_code == 0, result.output
+    assert result.exception is None, result.exception
+    dispatch.assert_called_once()
+
+
 def test_start_cli_runner_process_uses_token_bound_runner_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

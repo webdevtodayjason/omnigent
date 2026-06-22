@@ -4463,31 +4463,29 @@ def _ensure_bundled_agent_brain_credential(name: str) -> None:
     config = effective_config_with_detected(load_config())
     if default_provider_for_harness(config, brain_harness) is not None:
         return
-    # No default for the brain's family. Fall back to the first on-disk
-    # credential serving it, so a launch works without the user manually
-    # picking/configuring one.
+    # Read on-disk providers forgivingly: load_config() tolerates a corrupt
+    # config, but _load_global_config() doesn't — degrade, don't crash.
+    try:
+        on_disk = _load_global_config()
+    except (OSError, yaml.YAMLError):
+        return
+    disk_block = on_disk.get("providers") if isinstance(on_disk, dict) else None
+    if not isinstance(disk_block, dict):
+        return
+    # Adopt the first on-disk credential for the family as the default; skip
+    # ambient-detected entries (not on disk) — they're auto-defaulted upstream.
     for entry_name, entry in load_providers(config).items():
-        if family not in provider_families(entry):
+        if family not in provider_families(entry) or entry_name not in disk_block:
             continue
-        # The merged config may include ambient-detected providers not on
-        # disk; only persist a default for an explicit on-disk entry.
-        # (``effective_config_with_detected`` already marks a detected provider
-        # the default for a family lacking one, so an ambient-only entry would
-        # normally not reach here — but if one does, skip it and keep looking
-        # for a persistable on-disk credential rather than bailing.)
-        block = _load_global_config().get("providers")
-        if isinstance(block, dict) and entry_name in block:
-            _save_global_config({"providers": set_default_provider(block, entry_name, family)})
-            # Persisting a default the user didn't pick is a config mutation on
-            # a launch command — announce it (and how to change it), matching
-            # the confirmation the `setup` / `/model` paths already print.
-            click.echo(
-                f"No default {family_label(family)} credential set — "
-                f"using {_credential_label(entry_name, entry)} and saving it as "
-                f"the default (change anytime with: omnigent /model).",
-                err=True,
-            )
-            return
+        _save_global_config({"providers": set_default_provider(disk_block, entry_name, family)})
+        # Announce: this mutates the user's config on a launch command.
+        click.echo(
+            f"No default {family_label(family)} credential set — "
+            f"using {_credential_label(entry_name, entry)} and saving it as "
+            f"the default (change anytime with: omnigent /model).",
+            err=True,
+        )
+        return
 
 
 @cli.command(
