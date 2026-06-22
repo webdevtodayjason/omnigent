@@ -4443,6 +4443,7 @@ def _ensure_bundled_agent_brain_credential(name: str) -> None:
 
     :param name: Bundled example directory name, e.g. ``"polly"``.
     """
+    from omnigent.errors import OmnigentError
     from omnigent.onboarding.configure_models import family_label
     from omnigent.onboarding.detected import effective_config_with_detected
     from omnigent.onboarding.provider_config import (
@@ -4460,31 +4461,34 @@ def _ensure_bundled_agent_brain_credential(name: str) -> None:
     family = harness_family(brain_harness)
     if family is None:
         return
-    config = effective_config_with_detected(load_config())
-    if default_provider_for_harness(config, brain_harness) is not None:
-        return
-    # Read on-disk providers forgivingly: load_config() tolerates a corrupt
-    # config, but _load_global_config() doesn't — degrade, don't crash.
+    # Best-effort: adopting a default must never crash a launch. Any malformed
+    # or unexpected config state (corrupt YAML, ambiguous defaults, a divergent
+    # on-disk entry) degrades to a no-op — the harness then raises its own
+    # credential error.
     try:
+        config = effective_config_with_detected(load_config())
+        if default_provider_for_harness(config, brain_harness) is not None:
+            return
         on_disk = _load_global_config()
-    except (OSError, yaml.YAMLError):
-        return
-    disk_block = on_disk.get("providers") if isinstance(on_disk, dict) else None
-    if not isinstance(disk_block, dict):
-        return
-    # Adopt the first on-disk credential for the family as the default; skip
-    # ambient-detected entries (not on disk) — they're auto-defaulted upstream.
-    for entry_name, entry in load_providers(config).items():
-        if family not in provider_families(entry) or entry_name not in disk_block:
-            continue
-        _save_global_config({"providers": set_default_provider(disk_block, entry_name, family)})
-        # Announce: this mutates the user's config on a launch command.
-        click.echo(
-            f"No default {family_label(family)} credential set — "
-            f"using {_credential_label(entry_name, entry)} and saving it as "
-            f"the default (change anytime with: omnigent /model).",
-            err=True,
-        )
+        disk_block = on_disk.get("providers") if isinstance(on_disk, dict) else None
+        if not isinstance(disk_block, dict):
+            return
+        # Skip ambient-detected entries (not on disk) — auto-defaulted upstream.
+        for entry_name, entry in load_providers(config).items():
+            if family not in provider_families(entry) or entry_name not in disk_block:
+                continue
+            _save_global_config(
+                {"providers": set_default_provider(disk_block, entry_name, family)}
+            )
+            # Announce: this mutates the user's config on a launch command.
+            click.echo(
+                f"No default {family_label(family)} credential set — "
+                f"using {_credential_label(entry_name, entry)} and saving it as "
+                f"the default (change anytime with: omnigent /model).",
+                err=True,
+            )
+            return
+    except (OSError, yaml.YAMLError, OmnigentError):
         return
 
 

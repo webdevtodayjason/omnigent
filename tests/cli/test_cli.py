@@ -792,6 +792,56 @@ def test_bundled_agent_unreadable_global_config_degrades_to_launch(
     dispatch.assert_called_once()
 
 
+def test_bundled_agent_ambiguous_default_config_degrades_to_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An ambiguous config (two defaults for one family) degrades, never crashes.
+
+    The fallback touches the config through several readers
+    (``effective_config_with_detected``, ``default_provider_for_harness``,
+    ``set_default_provider``), any of which raise ``OmnigentError`` on a
+    malformed/ambiguous config. Here two anthropic providers are both marked
+    ``default: true`` — which ``get_default_provider`` rejects — so the read
+    raises before the loop. The bundled launch must swallow it and dispatch,
+    letting the harness raise its own credential error, rather than crashing
+    with a traceback. Regression for the narrow guard that caught only the
+    ``_load_global_config`` read.
+    """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr("omnigent.onboarding.detected.detect_providers", list)
+    monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
+    _write_isolated_provider_config(
+        tmp_path,
+        {
+            "anthropic_a": {
+                "kind": "key",
+                "default": True,
+                "anthropic": {
+                    "base_url": "https://api.anthropic.invalid/v1",
+                    "api_key_ref": "env:ANTHROPIC_A",
+                },
+            },
+            "anthropic_b": {
+                "kind": "key",
+                "default": True,
+                "anthropic": {
+                    "base_url": "https://api.anthropic.invalid/v1",
+                    "api_key_ref": "env:ANTHROPIC_B",
+                },
+            },
+        },
+    )
+    dispatch = Mock()
+    monkeypatch.setattr("omnigent.cli._dispatch_run", dispatch)
+
+    result = CliRunner().invoke(cli, ["polly"])
+
+    assert result.exit_code == 0, result.output
+    assert result.exception is None, result.exception
+    dispatch.assert_called_once()
+
+
 def test_start_cli_runner_process_uses_token_bound_runner_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
