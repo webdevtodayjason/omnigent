@@ -4430,7 +4430,9 @@ def _ensure_bundled_agent_brain_credential(name: str) -> None:
     ``default: true`` up front — so users can start without manually
     picking/configuring one. When no default provider is configured for the
     agent's brain harness, pick the first available credential serving that
-    family and mark it the default so the downstream ``run`` resolves it.
+    family and mark it the default so the downstream ``run`` resolves it —
+    printing a notice (to stderr) since this mutates the user's config on a
+    launch command, mirroring the confirmation ``setup`` / ``/model`` show.
 
     No-op when a default is already configured, or when no credential is
     available for the family (the harness raises its own launch error then).
@@ -4441,6 +4443,7 @@ def _ensure_bundled_agent_brain_credential(name: str) -> None:
 
     :param name: Bundled example directory name, e.g. ``"polly"``.
     """
+    from omnigent.onboarding.configure_models import family_label
     from omnigent.onboarding.detected import effective_config_with_detected
     from omnigent.onboarding.provider_config import (
         default_provider_for_harness,
@@ -4475,6 +4478,15 @@ def _ensure_bundled_agent_brain_credential(name: str) -> None:
         block = _load_global_config().get("providers")
         if isinstance(block, dict) and entry_name in block:
             _save_global_config({"providers": set_default_provider(block, entry_name, family)})
+            # Persisting a default the user didn't pick is a config mutation on
+            # a launch command — announce it (and how to change it), matching
+            # the confirmation the `setup` / `/model` paths already print.
+            click.echo(
+                f"No default {family_label(family)} credential set — "
+                f"using {_credential_label(entry_name, entry)} and saving it as "
+                f"the default (change anytime with: omnigent /model).",
+                err=True,
+            )
             return
 
 

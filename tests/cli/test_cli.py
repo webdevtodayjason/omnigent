@@ -665,6 +665,8 @@ def test_bundled_agent_launches_with_first_available_credential(
     saved = yaml.safe_load((tmp_path / "config.yaml").read_text())
     provider = saved["providers"]["anthropic_key"]
     assert provider.get("default") is True
+    # The silent config mutation is announced (mirrors setup / /model).
+    assert "saving it as the default" in result.output
     # And the launch proceeded (the brain credential resolved).
     dispatch.assert_called_once()
     assert dispatch.call_args.kwargs["target"] == _bundled_example_path(shorthand)
